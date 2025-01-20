@@ -1,0 +1,248 @@
+# scripts/analysis.py
+
+import pandas as pd
+import matplotlib.pyplot as plt
+import scipy.stats as stats
+from scipy.stats import shapiro, kruskal, spearmanr
+import numpy as np
+
+# ติดตั้ง pingouin (ถ้ายังไม่มี) แล้ว import
+try:
+    import pingouin as pg
+    from pingouin import scheirer_ray_hare
+    PINGOUIN_OK = True
+except ImportError:
+    PINGOUIN_OK = False
+    print("pingouin is not installed. Please install with: pip install pingouin")
+
+
+# ------------------------------------------------------
+# 1) โหลดข้อมูลจาก Google Sheets
+# ------------------------------------------------------
+url = "https://docs.google.com/spreadsheets/d/13oJHWG48vVJrh5WwkFzI0T0j9niPxvx3Gz4rwFX8js4/export?format=csv&gid=1940769691"
+df = pd.read_csv(url)
+
+# ------------------------------------------------------
+# 2) ตรวจข้อมูลเบื้องต้น: Missing Values, ดูตัวอย่าง
+# ------------------------------------------------------
+print("=== First 5 rows ===")
+print(df.head())
+print("\n=== Info ===")
+print(df.info())
+print("\n=== Missing Values ===")
+print(df.isna().sum())
+
+# ------------------------------------------------------
+# 3) สร้าง FFP Storage Group แบบ 5 กลุ่ม
+# ------------------------------------------------------
+bins = [0, 1, 7, 14, 30, float('inf')]
+labels = ['1 Day', '2-7', '8-14', '15-30', '30+']
+df['FFP Storage Group'] = pd.cut(df['FFP Storage Duration (Days)'], bins=bins, labels=labels)
+
+# ------------------------------------------------------
+# 4) Descriptive Statistics (Overall + แยกเพศ)
+# ------------------------------------------------------
+numeric_df = df.select_dtypes(include='number')
+
+# 4.1 สถิติเชิงพรรณนา (Overall)
+summary_overall = numeric_df.describe().T
+summary_overall['median'] = numeric_df.median()
+summary_overall = summary_overall[['mean', 'std', 'min', '50%', 'max', 'median']]
+summary_overall.columns = ['mean', 'sd', 'min', '50%', 'max', 'median']
+print("\n=== Descriptive Statistics (Overall) ===")
+print(summary_overall)
+
+# 4.2 แยกเพศ
+def descriptive_stats_by_gender(df_in, gender_label):
+    df_subset = df_in[df_in['Gender'] == gender_label].select_dtypes(include='number')
+    if len(df_subset) == 0:
+        return None
+    desc = df_subset.describe().T
+    desc['median'] = df_subset.median()
+    desc = desc[['mean', 'std', 'min', '50%', 'max', 'median']]
+    desc.columns = ['mean', 'sd', 'min', '50%', 'max', 'median']
+    return desc
+
+desc_m = descriptive_stats_by_gender(df, 'M')
+desc_f = descriptive_stats_by_gender(df, 'F')
+
+print("\n=== Descriptive Statistics for M ===")
+print(desc_m)
+
+print("\n=== Descriptive Statistics for F ===")
+print(desc_f)
+
+# ------------------------------------------------------
+# 5) ตรวจ Outliers ด้วย Boxplot (Fibrinogen)
+# ------------------------------------------------------
+plt.figure(figsize=(6, 4))
+plt.boxplot(df['Fibrinogen (mg/dL)'].dropna(), vert=True, patch_artist=True)
+plt.title('Boxplot of Fibrinogen (mg/dL)')
+plt.ylabel('Fibrinogen (mg/dL)')
+plt.show()
+
+# ------------------------------------------------------
+# 6) ดูการกระจาย: Histogram + Q-Q Plot
+# ------------------------------------------------------
+plt.figure(figsize=(10, 4))
+plt.subplot(1, 2, 1)
+plt.hist(df['Fibrinogen (mg/dL)'].dropna(), bins=20, edgecolor='black')
+plt.title("Histogram of Fibrinogen")
+plt.xlabel("Fibrinogen (mg/dL)")
+plt.ylabel("Frequency")
+
+plt.subplot(1, 2, 2)
+stats.probplot(df['Fibrinogen (mg/dL)'].dropna(), dist="norm", plot=plt)
+plt.title("Q-Q Plot of Fibrinogen")
+
+plt.tight_layout()
+plt.show()
+
+# ------------------------------------------------------
+# 7) ทดสอบ Normality (Shapiro) แบบ Overall
+# ------------------------------------------------------
+fibrinogen_col = 'Fibrinogen (mg/dL)'
+stat_sh, p_sh = shapiro(df[fibrinogen_col].dropna())
+print(f"\nShapiro-Wilk Test for {fibrinogen_col} (Overall):")
+print(f"Statistic = {stat_sh:.4f}, p-value = {p_sh:.4f}")
+if p_sh < 0.05:
+    print("=> ข้อมูลไม่เป็น Normal (Reject H0).")
+else:
+    print("=> ข้อมูลอาจเป็น Normal (Fail to reject H0).")
+
+# ------------------------------------------------------
+# 8) Spearman Correlation (Heatmap) สำหรับตัวแปรเชิงตัวเลข
+# ------------------------------------------------------
+spearman_corr = numeric_df.corr(method='spearman')
+plt.figure(figsize=(8, 6))
+im = plt.imshow(spearman_corr, cmap='coolwarm', aspect='auto')
+plt.colorbar(im)
+plt.title("Spearman Correlation Heatmap")
+plt.xticks(np.arange(len(spearman_corr.columns)), spearman_corr.columns, rotation=45, ha='right')
+plt.yticks(np.arange(len(spearman_corr.index)), spearman_corr.index)
+
+# ใส่ค่าตัวเลขลงในแต่ละ cell
+for i in range(len(spearman_corr.index)):
+    for j in range(len(spearman_corr.columns)):
+        plt.text(j, i, f"{spearman_corr.iloc[i, j]:.2f}",
+                 ha='center', va='center', color='black', fontsize=8)
+
+plt.tight_layout()
+plt.show()
+
+# ------------------------------------------------------
+# (ตัวอย่าง) Spearman ระหว่าง Cryo Volume กับ Fibrinogen
+# ------------------------------------------------------
+cryo_col = 'Cryo Volume (ml/unit)'
+corr_val, p_val_spear = spearmanr(df[cryo_col].dropna(), df[fibrinogen_col].dropna())
+print(f"\nSpearman correlation between {cryo_col} and {fibrinogen_col}: {corr_val:.4f}, p={p_val_spear:.4f}")
+
+# ------------------------------------------------------
+# 9) ดูค่าเฉลี่ย Fibrinogen ของแต่ละ FFP Storage Group (Bar Chart)
+# ------------------------------------------------------
+grouped_mean = df.groupby('FFP Storage Group')[fibrinogen_col].mean().reset_index()
+plt.figure(figsize=(6, 4))
+plt.bar(grouped_mean['FFP Storage Group'], grouped_mean[fibrinogen_col], edgecolor='black')
+plt.title("Mean Fibrinogen by FFP Storage Group")
+plt.xlabel("FFP Storage Group")
+plt.ylabel("Mean Fibrinogen (mg/dL)")
+plt.grid(axis='y', linestyle='--', alpha=0.7)
+plt.show()
+
+# ------------------------------------------------------
+# 10) ทดสอบ Kruskal-Wallis ถ้าเราดูปัจจัย FFP Storage Group ปัจจัยเดียว
+# ------------------------------------------------------
+groups = [g[fibrinogen_col].dropna() for _, g in df.groupby('FFP Storage Group') if len(g[fibrinogen_col].dropna())>0]
+if len(groups) > 1:
+    kw_stat, kw_p = kruskal(*groups)
+    print(f"\nKruskal-Wallis (FFP Storage Group): H-stat={kw_stat:.4f}, p={kw_p:.4f}")
+else:
+    print("\nNot enough groups to do Kruskal-Wallis")
+
+# ------------------------------------------------------
+# 11) Grouped Bar Chart: แยกเพศในแต่ละ FFP Storage Group
+# ------------------------------------------------------
+grouped_gender = df.groupby(['FFP Storage Group','Gender'])[fibrinogen_col].mean().reset_index()
+pivot_g = grouped_gender.pivot(index='FFP Storage Group', columns='Gender', values=fibrinogen_col)
+
+plt.figure(figsize=(8,4))
+x = np.arange(len(pivot_g.index))
+bar_width = 0.35
+
+m_vals = pivot_g['M'] if 'M' in pivot_g.columns else [0]*len(pivot_g)
+f_vals = pivot_g['F'] if 'F' in pivot_g.columns else [0]*len(pivot_g)
+
+plt.bar(x - bar_width/2, m_vals, width=bar_width, label='M', edgecolor='black', alpha=0.7)
+plt.bar(x + bar_width/2, f_vals, width=bar_width, label='F', edgecolor='black', alpha=0.7)
+
+plt.xticks(x, pivot_g.index)
+plt.xlabel("FFP Storage Group")
+plt.ylabel("Mean Fibrinogen (mg/dL)")
+plt.title("Mean Fibrinogen by FFP Storage Group and Gender")
+plt.legend()
+plt.grid(axis='y', linestyle='--', alpha=0.7)
+plt.tight_layout()
+plt.show()
+
+# ------------------------------------------------------
+# 12) Kruskal-Wallis ภายในแต่ละ Group เพื่อเทียบ M vs F
+# ------------------------------------------------------
+all_results = []
+for group_name, sub_data in df.groupby('FFP Storage Group'):
+    m_group = sub_data[sub_data['Gender'] == 'M'][fibrinogen_col].dropna()
+    f_group = sub_data[sub_data['Gender'] == 'F'][fibrinogen_col].dropna()
+    if len(m_group) > 0 and len(f_group) > 0:
+        h_stat, p_val = kruskal(m_group, f_group)
+        all_results.append((group_name, h_stat, p_val))
+    else:
+        all_results.append((group_name, np.nan, np.nan))
+
+print("\nKruskal-Wallis (M vs F) in each FFP Storage Group:")
+print(pd.DataFrame(all_results, columns=['FFP Storage Group', 'H-stat', 'p-value']))
+
+# ------------------------------------------------------
+# 13) ใช้ Scheirer–Ray–Hare test (Non-parametric Two-way)
+#     เพื่อดูผลของ FFP Storage Group + Gender พร้อมกัน
+# ------------------------------------------------------
+if PINGOUIN_OK:
+    # เตรียมข้อมูล: เอาเฉพาะแถวที่ไม่มีค่า NaN ในตัวแปรที่สนใจ
+    df_srh = df.dropna(subset=[fibrinogen_col, 'FFP Storage Group', 'Gender']).copy()
+    
+    # เรียกใช้งาน
+    srh_result = scheirer_ray_hare(dv=fibrinogen_col, 
+                                   between=['FFP Storage Group', 'Gender'],
+                                   data=df_srh)
+    print("\n=== Scheirer–Ray–Hare Test (Non-parametric Two-way) ===")
+    print(srh_result)
+    print("\nInterpretation:")
+    print(" - ถ้า p-unc < 0.05 => มีนัยสำคัญทางสถิติ")
+    print(" - Factor1: FFP Storage Group")
+    print(" - Factor2: Gender")
+    print(" - Interaction: Factor1*Factor2\n")
+
+    # ถ้า Interaction significant => วิเคราะห์เจาะลึกด้วย Post-hoc ต่อไป
+else:
+    print("\npingouin not installed, cannot run Scheirer-Ray-Hare test.")
+
+
+# ------------------------------------------------------
+# 14) (ตัวอย่าง) Post-hoc หลายคู่ด้วย pingouin.pairwise_tests
+#     เช่น ถ้า Factor1 มีหลายกลุ่ม (1 Day, 2-7, ...),
+#     เราอาจใช้ pairwise Kruskal/Dunn test
+# ------------------------------------------------------
+if PINGOUIN_OK:
+    # ตัวอย่าง: pairwise test สำหรับ FFP Storage Group (ไม่สน Gender)
+    # method='kruskal' + p-adjust='bonf' (Bonferroni) หรือ 'holm' หรือ 'fdr_bh'
+    pairwise_res = pg.pairwise_tests(dv=fibrinogen_col,
+                                     between='FFP Storage Group',
+                                     data=df_srh,
+                                     parametric=False,
+                                     padjust='bonf')
+    print("=== Pairwise Test (Kruskal/Dunn) for FFP Storage Group ===")
+    print(pairwise_res)
+    print("\n(วิธีดู: ถ้าคู่ไหน p-corr < 0.05 => แตกต่างอย่างมีนัยสำคัญ)\n")
+
+# ------------------------------------------------------
+# 15) สรุปงาน
+# ------------------------------------------------------
+print("=== Analysis Complete ===")
